@@ -88,7 +88,7 @@ impl TryFrom<u32> for Instruction {
         use Instruction::*;
         let opcode = value & 0x7f;
         match opcode {
-            // R FMT
+            // Arith - R FMT
             0x33 => {
                 let funct3 = (value >> 12) & 0x7;
                 let funct7 = value >> 25;
@@ -114,7 +114,7 @@ impl TryFrom<u32> for Instruction {
                     ),
                 }
             }
-            // I FMT
+            // Airth Imm - I FMT
             0x13 => {
                 let funct3 = (value >> 12) & 0x7;
                 let rd = ((value >> 7) & 0x1f) as usize;
@@ -145,7 +145,7 @@ impl TryFrom<u32> for Instruction {
                     _ => bail!("invalid funct3:{:x}", funct3),
                 }
             }
-            // I FMT
+            // Load - I FMT
             0x03 => {
                 let funct3 = (value >> 12) & 0x7;
                 let rd = ((value >> 7) & 0x1f) as usize;
@@ -160,7 +160,7 @@ impl TryFrom<u32> for Instruction {
                     _ => bail!("invalid load funct3:{:x}", funct3),
                 }
             }
-            // S FMT
+            // Store - S FMT
             0x23 => {
                 let funct3 = (value >> 12) & 0x7;
                 let rs2 = ((value >> 20) & 0x1f) as usize;
@@ -173,7 +173,7 @@ impl TryFrom<u32> for Instruction {
                     _ => bail!("invalid store funct3:{:x}", funct3),
                 }
             }
-            // B FMT
+            // Branch - B FMT
             0x63 => {
                 let funct3 = (value >> 12) & 0x7;
                 let rs2 = ((value >> 20) & 0x1f) as usize;
@@ -193,7 +193,7 @@ impl TryFrom<u32> for Instruction {
                     _ => bail!("invalid branch funct3:{:x}", funct3),
                 }
             }
-            // J FMT
+            // Jump And Link - J FMT
             0x6f => {
                 let rd = ((value >> 7) & 0x1f) as usize;
                 let imm_1_10 = (value >> 21) & 0x3ff;
@@ -203,7 +203,7 @@ impl TryFrom<u32> for Instruction {
                 imm |= (imm_1_10 << 1 | imm_11 << 11 | imm_12_19 << 12) as i32;
                 Ok(Jal { rd, imm })
             }
-            // I FMT
+            // Jump And Link Reg - I FMT
             0x67 => {
                 let funct3 = (value >> 12) & 0x7;
                 if funct3 != 0x0 {
@@ -214,18 +214,19 @@ impl TryFrom<u32> for Instruction {
                 let imm = (value as i32) >> 20;
                 Ok(Jalr { rd, rs1, imm })
             }
-            // U FMT
+            // Load Upper Imm - U FMT
             0x37 => {
                 let rd = ((value >> 7) & 0x1f) as usize;
                 let imm = value & 0xffff_f000;
                 Ok(Lui { rd, imm })
             }
-            // U FMT
+            // Add Upper Imm to PC - U FMT
             0x17 => {
                 let rd = ((value >> 7) & 0x1f) as usize;
                 let imm = value & 0xffff_f000;
                 Ok(Auipc { rd, imm })
             }
+            // Environment
             0x73 => {
                 let funct3 = (value >> 12) & 0x7;
                 if funct3 != 0x00 {
@@ -272,7 +273,6 @@ mod inst_tests {
         let rs2 = 3;
         let imm = -2048;
         let maps = vec![
-            //f7       rs2   rs1   f3  rd    opcode
             (
                 0b0000000_00011_00010_000_00001_0110011_u32,
                 Add { rd, rs1, rs2 },
@@ -310,7 +310,6 @@ mod inst_tests {
                 0b0000000_00011_00010_011_00001_0110011,
                 Sltu { rd, rs1, rs2 },
             ),
-            //imm             rs1   f3  rd    opcode
             (
                 0b1000_0000_0000_00010_000_00001_0010011,
                 Addi { rd, rs1, imm },
@@ -347,7 +346,6 @@ mod inst_tests {
                 0b1000_0000_0000_00010_011_00001_0010011,
                 Sltiu { rd, rs1, imm },
             ),
-            //imm             rs1   f3  rd    opcode
             (
                 0b1000_0000_0000_00010_000_00001_0000011,
                 Lb { rd, rs1, imm },
@@ -368,7 +366,6 @@ mod inst_tests {
                 0b1000_0000_0000_00010_101_00001_0000011,
                 Lhu { rd, rs1, imm },
             ),
-            //imm[h]   rs2   rs1   f3  imm[l] op
             (
                 0b1000000_00011_00010_000_00000_0100011,
                 Sb { rs2, imm, rs1 },
@@ -381,7 +378,6 @@ mod inst_tests {
                 0b1000000_00011_00010_010_00000_0100011,
                 Sw { rs2, imm, rs1 },
             ),
-            //imm[h]   rs2   rs1   f3  imm[l] op
             (
                 0b1000000_00011_00010_000_00001_1100011,
                 Beq { rs1, rs2, imm },
