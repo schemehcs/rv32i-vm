@@ -1,5 +1,3 @@
-use std::ops::Shr;
-
 use anyhow::bail;
 
 #[derive(Debug, PartialEq)]
@@ -121,7 +119,7 @@ impl TryFrom<u32> for Instruction {
                 let funct3 = (value >> 12) & 0x7;
                 let rd = ((value >> 7) & 0x1f) as usize;
                 let rs1 = ((value >> 15) & 0x1f) as usize;
-                let imm = (value as i32).shr(20);
+                let imm = (value as i32) >> 20;
                 match funct3 {
                     0x0 => Ok(Addi { rd, rs1, imm }),
                     0x4 => Ok(Xori { rd, rs1, imm }),
@@ -152,7 +150,7 @@ impl TryFrom<u32> for Instruction {
                 let funct3 = (value >> 12) & 0x7;
                 let rd = ((value >> 7) & 0x1f) as usize;
                 let rs1 = ((value >> 15) & 0x1f) as usize;
-                let imm = (value as i32).shr(20);
+                let imm = (value as i32) >> 20;
                 match funct3 {
                     0x0 => Ok(Lb { rd, rs1, imm }),
                     0x1 => Ok(Lh { rd, rs1, imm }),
@@ -166,7 +164,7 @@ impl TryFrom<u32> for Instruction {
             0x23 => {
                 let funct3 = (value >> 12) & 0x7;
                 let rs2 = ((value >> 20) & 0x1f) as usize;
-                let imm = ((value >> 7) & 0x1f) as i32 | ((value as i32).shr(20) & !0b11111);
+                let imm = ((value >> 7) & 0x1f) as i32 | ((value as i32) >> 20 & !0b11111);
                 let rs1 = ((value >> 15) & 0x1f) as usize;
                 match funct3 {
                     0x0 => Ok(Sb { rs2, imm, rs1 }),
@@ -182,7 +180,7 @@ impl TryFrom<u32> for Instruction {
                 let imm_0_4 = (value >> 7) & 0x1e;
                 let imm_5_10 = (value >> 25) & 0x3f;
                 let imm_11 = value >> 7 & 0x1;
-                let mut imm = (value as i32).shr(19) & !0xfff;
+                let mut imm = (value as i32) >> 19 & !0xfff;
                 imm |= (imm_0_4 | (imm_5_10 << 5) | imm_11 << 11) as i32;
                 let rs1 = ((value >> 15) & 0x1f) as usize;
                 match funct3 {
@@ -201,7 +199,7 @@ impl TryFrom<u32> for Instruction {
                 let imm_1_10 = (value >> 21) & 0x3ff;
                 let imm_11 = (value >> 20) & 0x1;
                 let imm_12_19 = (value >> 12) & 0xff;
-                let mut imm = (value as i32).shr(11) & !0xfffff;
+                let mut imm = (value as i32) >> 11 & !0xfffff;
                 imm |= (imm_1_10 << 1 | imm_11 << 11 | imm_12_19 << 12) as i32;
                 Ok(Jal { rd, imm })
             }
@@ -213,7 +211,7 @@ impl TryFrom<u32> for Instruction {
                 }
                 let rd = ((value >> 7) & 0x1f) as usize;
                 let rs1 = ((value >> 15) & 0x1f) as usize;
-                let imm = (value as i32).shr(20);
+                let imm = (value as i32) >> 20;
                 Ok(Jalr { rd, rs1, imm })
             }
             // U FMT
