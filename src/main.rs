@@ -1,4 +1,4 @@
-use anyhow::{Ok, bail};
+use anyhow::{Ok, anyhow, bail};
 
 #[derive(Debug, PartialEq)]
 enum Instruction {
@@ -80,6 +80,8 @@ enum Instruction {
     Ecall,
     /// Env Break Transfer control to debugger
     Ebreak,
+    /// Fence memory and I/O operations
+    Fence,
 }
 
 impl TryFrom<u32> for Instruction {
@@ -88,6 +90,20 @@ impl TryFrom<u32> for Instruction {
         use Instruction::*;
         let opcode = value & 0x7f;
         match opcode {
+            // Fence - I FMT
+            0x0f => {
+                let funct3 = (value >> 12) & 0x7;
+                let rd = (value >> 7) & 0x1f;
+                let rs1 = (value >> 15) & 0x1f;
+                let fm = value >> 28;
+                let pred = (value >> 24) & 0xf;
+                let succ = (value >> 20) & 0xf;
+                let valid_fm = fm == 0 || (fm == 0b1000 && pred == 0b0011 && succ == 0b0011);
+                if funct3 != 0 || rd != 0 || rs1 != 0 || !valid_fm {
+                    bail!("invalid fence instruction:{:08x}", value);
+                }
+                Ok(Fence)
+            }
             // Arith - R FMT
             0x33 => {
                 let funct3 = (value >> 12) & 0x7;
@@ -233,7 +249,9 @@ impl TryFrom<u32> for Instruction {
             // Environment
             0x73 => {
                 let funct3 = (value >> 12) & 0x7;
-                if funct3 != 0x00 {
+                let rd = (value >> 7) & 0x1f;
+                let rs1 = (value >> 15) & 0x1f;
+                if funct3 != 0x00 || rd != 0 || rs1 != 0 {
                     bail!("invalid environment funct3:{:x}", funct3);
                 }
                 let imm = ((value >> 20) & 0xfff) as i32;
@@ -244,6 +262,104 @@ impl TryFrom<u32> for Instruction {
                 }
             }
             _ => bail!("invalid opcode:{:b}", opcode),
+        }
+    }
+}
+
+impl From<Instruction> for u32 {
+    fn from(inst: Instruction) -> Self {
+        use Instruction::*;
+
+        fn encode_r(funct7: u32, rs2: usize, rs1: usize, funct3: u32, rd: usize) -> u32 {
+            (funct7 << 25)
+                | ((rs2 as u32 & 0x1f) << 20)
+                | ((rs1 as u32 & 0x1f) << 15)
+                | (funct3 << 12)
+                | ((rd as u32 & 0x1f) << 7)
+                | 0x33
+        }
+
+        fn encode_i(opcode: u32, funct3: u32, rd: usize, rs1: usize, imm: u32) -> u32 {
+            ((imm & 0xfff) << 20)
+                | ((rs1 as u32 & 0x1f) << 15)
+                | (funct3 << 12)
+                | ((rd as u32 & 0x1f) << 7)
+                | opcode
+        }
+
+        fn encode_s(funct3: u32, rs2: usize, imm: i32, rs1: usize) -> u32 {
+            let imm = imm as u32 & 0xfff;
+            ((imm >> 5) << 25)
+                | ((rs2 as u32 & 0x1f) << 20)
+                | ((rs1 as u32 & 0x1f) << 15)
+                | (funct3 << 12)
+                | ((imm & 0x1f) << 7)
+                | 0x23
+        }
+
+        fn encode_b(funct3: u32, rs1: usize, rs2: usize, imm: i32) -> u32 {
+            let imm = imm as u32 & 0x1fff;
+            (((imm >> 12) & 1) << 31)
+                | (((imm >> 5) & 0x3f) << 25)
+                | ((rs2 as u32 & 0x1f) << 20)
+                | ((rs1 as u32 & 0x1f) << 15)
+                | (funct3 << 12)
+                | (((imm >> 1) & 0xf) << 8)
+                | (((imm >> 11) & 1) << 7)
+                | 0x63
+        }
+
+        fn encode_j(rd: usize, imm: i32) -> u32 {
+            let imm = imm as u32 & 0x1f_ffff;
+            (((imm >> 20) & 1) << 31)
+                | (((imm >> 1) & 0x3ff) << 21)
+                | (((imm >> 11) & 1) << 20)
+                | (((imm >> 12) & 0xff) << 12)
+                | ((rd as u32 & 0x1f) << 7)
+                | 0x6f
+        }
+
+        match inst {
+            Add { rd, rs1, rs2 } => encode_r(0, rs2, rs1, 0, rd),
+            Sub { rd, rs1, rs2 } => encode_r(0x20, rs2, rs1, 0, rd),
+            Xor { rd, rs1, rs2 } => encode_r(0, rs2, rs1, 4, rd),
+            Or { rd, rs1, rs2 } => encode_r(0, rs2, rs1, 6, rd),
+            And { rd, rs1, rs2 } => encode_r(0, rs2, rs1, 7, rd),
+            Sll { rd, rs1, rs2 } => encode_r(0, rs2, rs1, 1, rd),
+            Srl { rd, rs1, rs2 } => encode_r(0, rs2, rs1, 5, rd),
+            Sra { rd, rs1, rs2 } => encode_r(0x20, rs2, rs1, 5, rd),
+            Slt { rd, rs1, rs2 } => encode_r(0, rs2, rs1, 2, rd),
+            Sltu { rd, rs1, rs2 } => encode_r(0, rs2, rs1, 3, rd),
+            Addi { rd, rs1, imm } => encode_i(0x13, 0, rd, rs1, imm as u32),
+            Xori { rd, rs1, imm } => encode_i(0x13, 4, rd, rs1, imm as u32),
+            Ori { rd, rs1, imm } => encode_i(0x13, 6, rd, rs1, imm as u32),
+            Andi { rd, rs1, imm } => encode_i(0x13, 7, rd, rs1, imm as u32),
+            Slli { rd, rs1, imm } => encode_i(0x13, 1, rd, rs1, imm as u32 & 0x1f),
+            Srli { rd, rs1, imm } => encode_i(0x13, 5, rd, rs1, imm as u32 & 0x1f),
+            Srai { rd, rs1, imm } => encode_i(0x13, 5, rd, rs1, 0x400 | (imm as u32 & 0x1f)),
+            Slti { rd, rs1, imm } => encode_i(0x13, 2, rd, rs1, imm as u32),
+            Sltiu { rd, rs1, imm } => encode_i(0x13, 3, rd, rs1, imm),
+            Lb { rd, rs1, imm } => encode_i(0x03, 0, rd, rs1, imm as u32),
+            Lh { rd, rs1, imm } => encode_i(0x03, 1, rd, rs1, imm as u32),
+            Lw { rd, rs1, imm } => encode_i(0x03, 2, rd, rs1, imm as u32),
+            Lbu { rd, rs1, imm } => encode_i(0x03, 4, rd, rs1, imm as u32),
+            Lhu { rd, rs1, imm } => encode_i(0x03, 5, rd, rs1, imm as u32),
+            Sb { rs2, imm, rs1 } => encode_s(0, rs2, imm, rs1),
+            Sh { rs2, imm, rs1 } => encode_s(1, rs2, imm, rs1),
+            Sw { rs2, imm, rs1 } => encode_s(2, rs2, imm, rs1),
+            Beq { rs1, rs2, imm } => encode_b(0, rs1, rs2, imm),
+            Bne { rs1, rs2, imm } => encode_b(1, rs1, rs2, imm),
+            Blt { rs1, rs2, imm } => encode_b(4, rs1, rs2, imm),
+            Bge { rs1, rs2, imm } => encode_b(5, rs1, rs2, imm),
+            Bltu { rs1, rs2, imm } => encode_b(6, rs1, rs2, imm),
+            Bgeu { rs1, rs2, imm } => encode_b(7, rs1, rs2, imm),
+            Jal { rd, imm } => encode_j(rd, imm),
+            Jalr { rd, rs1, imm } => encode_i(0x67, 0, rd, rs1, imm as u32),
+            Lui { rd, imm } => (imm & 0xffff_f000) | ((rd as u32 & 0x1f) << 7) | 0x37,
+            Auipc { rd, imm } => (imm & 0xffff_f000) | ((rd as u32 & 0x1f) << 7) | 0x17,
+            Ecall => 0x0000_0073,
+            Ebreak => 0x0010_0073,
+            Fence => 0x0000_000f,
         }
     }
 }
@@ -283,15 +399,30 @@ impl Machine {
     }
 
     fn advance_pc(&mut self) {
-        self.pc += 4
+        self.pc = (self.pc as u32).wrapping_add(4) as usize;
     }
 
     fn jump(&mut self, offset: i32) {
-        self.pc = self.pc.wrapping_add_signed(offset as isize);
+        self.pc = (self.pc as u32).wrapping_add(offset as u32) as usize;
+    }
+
+    fn effective_addr(&self, rs1: usize, imm: i32) -> usize {
+        (self.rru(rs1).wrapping_add(imm as u32)) as usize
+    }
+
+    fn memory_range(&self, addr: usize, size: usize) -> anyhow::Result<std::ops::Range<usize>> {
+        let end = addr
+            .checked_add(size)
+            .filter(|&end| end <= self.memory.len())
+            .ok_or_else(|| {
+                anyhow!("memory access out of bounds: address {addr:#x}, size {size}")
+            })?;
+        Ok(addr..end)
     }
 
     fn parse_inst(&self) -> anyhow::Result<Instruction> {
-        let word = u32::from_le_bytes(self.memory[self.pc..self.pc + 4].try_into()?);
+        let range = self.memory_range(self.pc, 4)?;
+        let word = u32::from_le_bytes(self.memory[range].try_into()?);
         Instruction::try_from(word)
     }
 
@@ -319,15 +450,15 @@ impl Machine {
                 self.advance_pc();
             }
             Sll { rd, rs1, rs2 } => {
-                self.wr(*rd, self.rr(*rs1) << self.rr(*rs2));
+                self.wr(*rd, self.rr(*rs1) << (self.rru(*rs2) & 0x1f));
                 self.advance_pc();
             }
             Srl { rd, rs1, rs2 } => {
-                self.wr(*rd, (self.rru(*rs1) >> self.rr(*rs2)) as i32);
+                self.wr(*rd, (self.rru(*rs1) >> (self.rru(*rs2) & 0x1f)) as i32);
                 self.advance_pc();
             }
             Sra { rd, rs1, rs2 } => {
-                self.wr(*rd, self.rr(*rs1) >> self.rr(*rs2));
+                self.wr(*rd, self.rr(*rs1) >> (self.rru(*rs2) & 0x1f));
                 self.advance_pc();
             }
             Slt { rd, rs1, rs2 } => {
@@ -363,15 +494,15 @@ impl Machine {
                 self.advance_pc();
             }
             Slli { rd, rs1, imm } => {
-                self.wr(*rd, self.rr(*rs1) << *imm);
+                self.wr(*rd, self.rr(*rs1) << (*imm as u32 & 0x1f));
                 self.advance_pc();
             }
             Srli { rd, rs1, imm } => {
-                self.wr(*rd, (self.rru(*rs1) >> *imm) as i32);
+                self.wr(*rd, (self.rru(*rs1) >> (*imm as u32 & 0x1f)) as i32);
                 self.advance_pc();
             }
             Srai { rd, rs1, imm } => {
-                self.wr(*rd, self.rr(*rs1) >> *imm);
+                self.wr(*rd, self.rr(*rs1) >> (*imm as u32 & 0x1f));
                 self.advance_pc();
             }
             Slti { rd, rs1, imm } => {
@@ -383,51 +514,63 @@ impl Machine {
                 self.advance_pc();
             }
             Lb { rd, rs1, imm } => {
-                let addr = (self.rr(*rs1) + imm) as usize;
-                let byte = self.memory[addr] as i8 as i32;
+                let addr = self.effective_addr(*rs1, *imm);
+                let byte = self.memory.get(addr).copied().ok_or_else(|| {
+                    anyhow!("memory access out of bounds: address {addr:#x}, size 1")
+                })? as i8 as i32;
                 self.wr(*rd, byte);
                 self.advance_pc();
             }
             Lh { rd, rs1, imm } => {
-                let addr = (self.rr(*rs1) + imm) as usize;
-                let hw: i16 = i16::from_le_bytes(self.memory[addr..addr + 2].try_into()?);
+                let addr = self.effective_addr(*rs1, *imm);
+                let range = self.memory_range(addr, 2)?;
+                let hw: i16 = i16::from_le_bytes(self.memory[range].try_into()?);
                 self.wr(*rd, hw as i32);
                 self.advance_pc();
             }
             Lw { rd, rs1, imm } => {
-                let addr = (self.rr(*rs1) + imm) as usize;
-                let wd: i32 = i32::from_le_bytes(self.memory[addr..addr + 4].try_into()?);
+                let addr = self.effective_addr(*rs1, *imm);
+                let range = self.memory_range(addr, 4)?;
+                let wd: i32 = i32::from_le_bytes(self.memory[range].try_into()?);
                 self.wr(*rd, wd);
                 self.advance_pc();
             }
             Lbu { rd, rs1, imm } => {
-                let addr = (self.rr(*rs1) + imm) as usize;
-                let byte = self.memory[addr];
+                let addr = self.effective_addr(*rs1, *imm);
+                let byte = self.memory.get(addr).copied().ok_or_else(|| {
+                    anyhow!("memory access out of bounds: address {addr:#x}, size 1")
+                })?;
                 self.wr(*rd, byte as i32);
                 self.advance_pc();
             }
             Lhu { rd, rs1, imm } => {
-                let addr = (self.rr(*rs1) + imm) as usize;
-                let hw: u16 = u16::from_le_bytes(self.memory[addr..addr + 2].try_into()?);
+                let addr = self.effective_addr(*rs1, *imm);
+                let range = self.memory_range(addr, 2)?;
+                let hw: u16 = u16::from_le_bytes(self.memory[range].try_into()?);
                 self.wr(*rd, hw as i32);
                 self.advance_pc();
             }
             Sb { rs2, imm, rs1 } => {
-                let addr = (self.rr(*rs1) + imm) as usize;
+                let addr = self.effective_addr(*rs1, *imm);
                 let val = self.rr(*rs2) as u8;
-                self.memory[addr] = val;
+                let byte = self.memory.get_mut(addr).ok_or_else(|| {
+                    anyhow!("memory access out of bounds: address {addr:#x}, size 1")
+                })?;
+                *byte = val;
                 self.advance_pc();
             }
             Sh { rs2, imm, rs1 } => {
-                let addr = (self.rr(*rs1) + imm) as usize;
+                let addr = self.effective_addr(*rs1, *imm);
                 let val = self.rr(*rs2) as u16;
-                self.memory[addr..addr + 1].copy_from_slice(&val.to_le_bytes());
+                let range = self.memory_range(addr, 2)?;
+                self.memory[range].copy_from_slice(&val.to_le_bytes());
                 self.advance_pc();
             }
             Sw { rs2, imm, rs1 } => {
-                let addr = (self.rr(*rs1) + imm) as usize;
+                let addr = self.effective_addr(*rs1, *imm);
                 let val = self.rr(*rs2);
-                self.memory[addr..addr + 1].copy_from_slice(&val.to_le_bytes());
+                let range = self.memory_range(addr, 4)?;
+                self.memory[range].copy_from_slice(&val.to_le_bytes());
                 self.advance_pc();
             }
             Beq { rs1, rs2, imm } => {
@@ -473,13 +616,13 @@ impl Machine {
                 }
             }
             Jal { rd, imm } => {
-                self.wru(*rd, self.pc as u32 + 4);
+                self.wru(*rd, (self.pc as u32).wrapping_add(4));
                 self.jump(*imm);
             }
             Jalr { rd, rs1, imm } => {
-                self.wru(*rd, self.pc as u32 + 4);
-                let addr = self.rr(*rs1) as isize + *imm as isize;
-                self.pc = addr as usize;
+                let target = self.effective_addr(*rs1, *imm) & !1;
+                self.wru(*rd, (self.pc as u32).wrapping_add(4));
+                self.pc = target;
             }
             Lui { rd, imm } => {
                 self.wru(*rd, *imm);
@@ -492,6 +635,7 @@ impl Machine {
             }
             Ecall => bail!("ecall not supported"),
             Ebreak => bail!("ebreak not supported"),
+            Fence => self.advance_pc(),
         }
         Ok(())
     }
@@ -547,7 +691,7 @@ fn main() -> anyhow::Result<()> {
         },
     ];
     for it in inst {
-        machine.exec_inst(&it);
+        machine.exec_inst(&it)?;
     }
     machine.debug();
     Ok(())
@@ -713,7 +857,149 @@ mod inst_tests {
             (0b0000_0000_0001_00000000_00000_1110011, Ebreak),
         ];
         for (bcode, inst) in maps {
-            assert_eq!(Instruction::try_from(bcode).unwrap(), inst)
+            assert_eq!(Instruction::try_from(bcode).unwrap(), inst);
+            assert_eq!(u32::from(inst), bcode);
         }
+    }
+}
+
+#[cfg(test)]
+mod execution_tests {
+    use super::{Instruction::*, Machine};
+
+    #[test]
+    fn stores_write_the_requested_number_of_bytes() {
+        let mut machine = Machine::new(16);
+        machine.register[1] = 4;
+        machine.register[2] = 0x1234_5678;
+
+        machine
+            .exec_inst(&Sh {
+                rs2: 2,
+                imm: 0,
+                rs1: 1,
+            })
+            .unwrap();
+        machine
+            .exec_inst(&Sw {
+                rs2: 2,
+                imm: 4,
+                rs1: 1,
+            })
+            .unwrap();
+
+        assert_eq!(&machine.memory[4..6], &[0x78, 0x56]);
+        assert_eq!(&machine.memory[8..12], &[0x78, 0x56, 0x34, 0x12]);
+        assert_eq!(machine.pc, 8);
+    }
+
+    #[test]
+    fn register_shifts_use_only_the_low_five_bits() {
+        let mut machine = Machine::new(16);
+        machine.register[1] = 0x8000_0001_u32 as i32;
+        machine.register[2] = 0x21;
+
+        machine
+            .exec_inst(&Sll {
+                rd: 3,
+                rs1: 1,
+                rs2: 2,
+            })
+            .unwrap();
+        machine
+            .exec_inst(&Srl {
+                rd: 4,
+                rs1: 1,
+                rs2: 2,
+            })
+            .unwrap();
+        machine
+            .exec_inst(&Sra {
+                rd: 5,
+                rs1: 1,
+                rs2: 2,
+            })
+            .unwrap();
+
+        assert_eq!(machine.rru(3), 2);
+        assert_eq!(machine.rru(4), 0x4000_0000);
+        assert_eq!(machine.rr(5), 0xc000_0000_u32 as i32);
+    }
+
+    #[test]
+    fn jalr_reads_source_before_link_write_and_clears_bit_zero() {
+        let mut machine = Machine::new(16);
+        machine.register[1] = 101;
+
+        machine
+            .exec_inst(&Jalr {
+                rd: 1,
+                rs1: 1,
+                imm: 2,
+            })
+            .unwrap();
+
+        assert_eq!(machine.register[1], 4);
+        assert_eq!(machine.pc, 102);
+    }
+
+    #[test]
+    fn memory_addresses_wrap_as_rv32_addresses() {
+        let mut machine = Machine::new(8);
+        machine.register[1] = -1;
+        machine.register[2] = 0x5a;
+
+        machine
+            .exec_inst(&Sb {
+                rs2: 2,
+                imm: 1,
+                rs1: 1,
+            })
+            .unwrap();
+
+        assert_eq!(machine.memory[0], 0x5a);
+    }
+
+    #[test]
+    fn out_of_bounds_memory_access_returns_error_without_panicking() {
+        let mut machine = Machine::new(4);
+        machine.register[1] = 3;
+        machine.register[2] = 0x1234;
+
+        assert!(
+            machine
+                .exec_inst(&Sh {
+                    rs2: 2,
+                    imm: 0,
+                    rs1: 1
+                })
+                .is_err()
+        );
+        assert_eq!(machine.pc, 0);
+        assert!(
+            machine
+                .exec_inst(&Lw {
+                    rd: 3,
+                    rs1: 1,
+                    imm: 0
+                })
+                .is_err()
+        );
+        assert_eq!(machine.pc, 0);
+        machine.pc = 4;
+        assert!(machine.parse_inst().is_err());
+    }
+
+    #[test]
+    fn fence_is_a_supported_no_op_and_invalid_system_encodings_are_rejected() {
+        let mut machine = Machine::new(4);
+        assert_eq!(super::Instruction::try_from(0x0000_000f).unwrap(), Fence);
+        assert_eq!(super::Instruction::try_from(0x8330_000f).unwrap(), Fence);
+        assert!(super::Instruction::try_from(0x8110_000f).is_err());
+        machine.exec_inst(&Fence).unwrap();
+        assert_eq!(machine.pc, 4);
+
+        let ecall_with_rd = 0x0000_00f3;
+        assert!(super::Instruction::try_from(ecall_with_rd).is_err());
     }
 }
