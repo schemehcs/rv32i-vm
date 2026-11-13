@@ -84,6 +84,26 @@ enum Instruction {
     Fence,
 }
 
+fn rd_field(word: u32) -> usize {
+    ((word >> 7) & 0x1f) as usize
+}
+
+fn rs1_field(word: u32) -> usize {
+    ((word >> 15) & 0x1f) as usize
+}
+
+fn rs2_field(word: u32) -> usize {
+    ((word >> 20) & 0x1f) as usize
+}
+
+fn funct3_field(word: u32) -> u32 {
+    (word >> 12) & 0x7
+}
+
+fn sign_extend(value: u32, width: u32) -> i32 {
+    ((value << (32 - width)) as i32) >> (32 - width)
+}
+
 impl TryFrom<u32> for Instruction {
     type Error = anyhow::Error;
     fn try_from(value: u32) -> anyhow::Result<Self> {
@@ -92,12 +112,12 @@ impl TryFrom<u32> for Instruction {
         match opcode {
             // Fence - I FMT
             0x0f => {
-                let funct3 = (value >> 12) & 0x7;
-                let rd = (value >> 7) & 0x1f;
-                let rs1 = (value >> 15) & 0x1f;
+                let funct3 = funct3_field(value);
                 let fm = value >> 28;
                 let pred = (value >> 24) & 0xf;
                 let succ = (value >> 20) & 0xf;
+                let rd = rd_field(value);
+                let rs1 = rs1_field(value);
                 let valid_fm = fm == 0 || (fm == 0b1000 && pred == 0b0011 && succ == 0b0011);
                 if funct3 != 0 || rd != 0 || rs1 != 0 || !valid_fm {
                     bail!("invalid fence instruction:{:08x}", value);
@@ -106,11 +126,11 @@ impl TryFrom<u32> for Instruction {
             }
             // Arith - R FMT
             0x33 => {
-                let funct3 = (value >> 12) & 0x7;
+                let funct3 = funct3_field(value);
                 let funct7 = value >> 25;
-                let rd = ((value >> 7) & 0x1f) as usize;
-                let rs1 = ((value >> 15) & 0x1f) as usize;
-                let rs2 = ((value >> 20) & 0x1f) as usize;
+                let rd = rd_field(value);
+                let rs1 = rs1_field(value);
+                let rs2 = rs2_field(value);
                 match (funct3, funct7) {
                     (0x0, 0x00) => Ok(Add { rd, rs1, rs2 }),
                     (0x0, 0x20) => Ok(Sub { rd, rs1, rs2 }),
@@ -132,27 +152,27 @@ impl TryFrom<u32> for Instruction {
             }
             // Airth Imm - I FMT
             0x13 => {
-                let funct3 = (value >> 12) & 0x7;
-                let rd = ((value >> 7) & 0x1f) as usize;
-                let rs1 = ((value >> 15) & 0x1f) as usize;
-                let imm = (value as i32) >> 20;
+                let funct3 = funct3_field(value);
+                let rd = rd_field(value);
+                let rs1 = rs1_field(value);
+                let imm = sign_extend(value >> 20, 12);
                 match funct3 {
                     0x0 => Ok(Addi { rd, rs1, imm }),
                     0x4 => Ok(Xori { rd, rs1, imm }),
                     0x6 => Ok(Ori { rd, rs1, imm }),
                     0x7 => Ok(Andi { rd, rs1, imm }),
                     0x1 => {
-                        if imm >> 5 != 0x00 {
-                            bail!("invalid shift left logical imm:{:x}", imm)
+                        if value >> 25 != 0 {
+                            bail!("invalid shift left logical imm:{:x}", value >> 20);
                         }
                         Ok(Slli { rd, rs1, imm })
                     }
-                    0x5 => match imm >> 5 {
+                    0x5 => match value >> 25 {
                         0x00 => Ok(Srli { rd, rs1, imm }),
                         0x20 => Ok(Srai {
                             rd,
                             rs1,
-                            imm: imm & 0x1f,
+                            imm: ((value >> 20) & 0x1f) as i32,
                         }),
                         _ => bail!("invalid shift imm:{:x}", imm),
                     },
@@ -167,10 +187,10 @@ impl TryFrom<u32> for Instruction {
             }
             // Load - I FMT
             0x03 => {
-                let funct3 = (value >> 12) & 0x7;
-                let rd = ((value >> 7) & 0x1f) as usize;
-                let rs1 = ((value >> 15) & 0x1f) as usize;
-                let imm = (value as i32) >> 20;
+                let funct3 = funct3_field(value);
+                let rd = rd_field(value);
+                let rs1 = rs1_field(value);
+                let imm = sign_extend(value >> 20, 12);
                 match funct3 {
                     0x0 => Ok(Lb { rd, rs1, imm }),
                     0x1 => Ok(Lh { rd, rs1, imm }),
@@ -182,10 +202,10 @@ impl TryFrom<u32> for Instruction {
             }
             // Store - S FMT
             0x23 => {
-                let funct3 = (value >> 12) & 0x7;
-                let rs2 = ((value >> 20) & 0x1f) as usize;
-                let imm = ((value >> 7) & 0x1f) as i32 | ((value as i32) >> 20 & !0b11111);
-                let rs1 = ((value >> 15) & 0x1f) as usize;
+                let funct3 = funct3_field(value);
+                let rs2 = rs2_field(value);
+                let rs1 = rs1_field(value);
+                let imm = sign_extend(((value >> 25) << 5) | ((value >> 7) & 0x1f), 12);
                 match funct3 {
                     0x0 => Ok(Sb { rs2, imm, rs1 }),
                     0x1 => Ok(Sh { rs2, imm, rs1 }),
@@ -195,14 +215,16 @@ impl TryFrom<u32> for Instruction {
             }
             // Branch - B FMT
             0x63 => {
-                let funct3 = (value >> 12) & 0x7;
-                let rs2 = ((value >> 20) & 0x1f) as usize;
-                let imm_0_4 = (value >> 7) & 0x1e;
-                let imm_5_10 = (value >> 25) & 0x3f;
-                let imm_11 = value >> 7 & 0x1;
-                let mut imm = (value as i32) >> 19 & !0xfff;
-                imm |= (imm_0_4 | (imm_5_10 << 5) | imm_11 << 11) as i32;
-                let rs1 = ((value >> 15) & 0x1f) as usize;
+                let funct3 = funct3_field(value);
+                let rs2 = rs2_field(value);
+                let rs1 = rs1_field(value);
+                let imm = sign_extend(
+                    (((value >> 31) & 1) << 12)
+                        | (((value >> 7) & 1) << 11)
+                        | (((value >> 25) & 0x3f) << 5)
+                        | (((value >> 8) & 0xf) << 1),
+                    13,
+                );
                 match funct3 {
                     0x0 => Ok(Beq { rs1, rs2, imm }),
                     0x1 => Ok(Bne { rs1, rs2, imm }),
@@ -215,42 +237,44 @@ impl TryFrom<u32> for Instruction {
             }
             // Jump And Link - J FMT
             0x6f => {
-                let rd = ((value >> 7) & 0x1f) as usize;
-                let imm_1_10 = (value >> 21) & 0x3ff;
-                let imm_11 = (value >> 20) & 0x1;
-                let imm_12_19 = (value >> 12) & 0xff;
-                let mut imm = (value as i32) >> 11 & !0xfffff;
-                imm |= (imm_1_10 << 1 | imm_11 << 11 | imm_12_19 << 12) as i32;
+                let rd = rd_field(value);
+                let imm = sign_extend(
+                    (((value >> 31) & 1) << 20)
+                        | (((value >> 12) & 0xff) << 12)
+                        | (((value >> 20) & 1) << 11)
+                        | (((value >> 21) & 0x3ff) << 1),
+                    21,
+                );
                 Ok(Jal { rd, imm })
             }
             // Jump And Link Reg - I FMT
             0x67 => {
-                let funct3 = (value >> 12) & 0x7;
+                let funct3 = funct3_field(value);
                 if funct3 != 0x0 {
                     bail!("invalid jalr funct3:{}", funct3);
                 }
-                let rd = ((value >> 7) & 0x1f) as usize;
-                let rs1 = ((value >> 15) & 0x1f) as usize;
-                let imm = (value as i32) >> 20;
+                let rd = rd_field(value);
+                let rs1 = rs1_field(value);
+                let imm = sign_extend(value >> 20, 12);
                 Ok(Jalr { rd, rs1, imm })
             }
             // Load Upper Imm - U FMT
             0x37 => {
-                let rd = ((value >> 7) & 0x1f) as usize;
+                let rd = rd_field(value);
                 let imm = value & 0xffff_f000;
                 Ok(Lui { rd, imm })
             }
             // Add Upper Imm to PC - U FMT
             0x17 => {
-                let rd = ((value >> 7) & 0x1f) as usize;
+                let rd = rd_field(value);
                 let imm = value & 0xffff_f000;
                 Ok(Auipc { rd, imm })
             }
             // Environment
             0x73 => {
-                let funct3 = (value >> 12) & 0x7;
-                let rd = (value >> 7) & 0x1f;
-                let rs1 = (value >> 15) & 0x1f;
+                let funct3 = funct3_field(value);
+                let rd = rd_field(value);
+                let rs1 = rs1_field(value);
                 if funct3 != 0x00 || rd != 0 || rs1 != 0 {
                     bail!("invalid environment funct3:{:x}", funct3);
                 }
@@ -701,165 +725,477 @@ fn main() -> anyhow::Result<()> {
 mod inst_tests {
     use super::Instruction::{self, *};
 
+    fn assert_round_trip(word: u32, expected: Instruction) {
+        assert_eq!(Instruction::try_from(word).unwrap(), expected);
+        assert_eq!(u32::from(expected), word);
+    }
+
     #[test]
-    fn validate() {
-        let rd = 1;
-        let rs1 = 2;
-        let rs2 = 3;
-        let imm = -2048;
-        let maps = vec![
-            (
-                0b0000000_00011_00010_000_00001_0110011_u32,
-                Add { rd, rs1, rs2 },
-            ),
-            (
-                0b0100000_00011_00010_000_00001_0110011,
-                Sub { rd, rs1, rs2 },
-            ),
-            (
-                0b0000000_00011_00010_100_00001_0110011,
-                Xor { rd, rs1, rs2 },
-            ),
-            (0b0000000_00011_00010_110_00001_0110011, Or { rd, rs1, rs2 }),
-            (
-                0b0000000_00011_00010_111_00001_0110011,
-                And { rd, rs1, rs2 },
-            ),
-            (
-                0b0000000_00011_00010_001_00001_0110011,
-                Sll { rd, rs1, rs2 },
-            ),
-            (
-                0b0000000_00011_00010_101_00001_0110011,
-                Srl { rd, rs1, rs2 },
-            ),
-            (
-                0b0100000_00011_00010_101_00001_0110011,
-                Sra { rd, rs1, rs2 },
-            ),
-            (
-                0b0000000_00011_00010_010_00001_0110011,
-                Slt { rd, rs1, rs2 },
-            ),
-            (
-                0b0000000_00011_00010_011_00001_0110011,
-                Sltu { rd, rs1, rs2 },
-            ),
-            (
-                0b1000_0000_0000_00010_000_00001_0010011,
-                Addi { rd, rs1, imm },
-            ),
-            (
-                0b1000_0000_0000_00010_100_00001_0010011,
-                Xori { rd, rs1, imm },
-            ),
-            (
-                0b1000_0000_0000_00010_110_00001_0010011,
-                Ori { rd, rs1, imm },
-            ),
-            (
-                0b1000_0000_0000_00010_111_00001_0010011,
-                Andi { rd, rs1, imm },
-            ),
-            (
-                0b0000_0000_1000_00010_001_00001_0010011,
-                Slli { rd, rs1, imm: 8 },
-            ),
-            (
-                0b0000_0000_1000_00010_101_00001_0010011,
-                Srli { rd, rs1, imm: 8 },
-            ),
-            (
-                0b0100_0000_1000_00010_101_00001_0010011,
-                Srai { rd, rs1, imm: 8 },
-            ),
-            (
-                0b1000_0000_0000_00010_010_00001_0010011,
-                Slti { rd, rs1, imm },
-            ),
-            (
-                0b1000_0000_0000_00010_011_00001_0010011,
-                Sltiu {
-                    rd,
-                    rs1,
-                    imm: imm as u32,
-                },
-            ),
-            (
-                0b1000_0000_0000_00010_000_00001_0000011,
-                Lb { rd, rs1, imm },
-            ),
-            (
-                0b1000_0000_0000_00010_001_00001_0000011,
-                Lh { rd, rs1, imm },
-            ),
-            (
-                0b1000_0000_0000_00010_010_00001_0000011,
-                Lw { rd, rs1, imm },
-            ),
-            (
-                0b1000_0000_0000_00010_100_00001_0000011,
-                Lbu { rd, rs1, imm },
-            ),
-            (
-                0b1000_0000_0000_00010_101_00001_0000011,
-                Lhu { rd, rs1, imm },
-            ),
-            (
-                0b1000000_00011_00010_000_00000_0100011,
-                Sb { rs2, imm, rs1 },
-            ),
-            (
-                0b1000000_00011_00010_001_00000_0100011,
-                Sh { rs2, imm, rs1 },
-            ),
-            (
-                0b1000000_00011_00010_010_00000_0100011,
-                Sw { rs2, imm, rs1 },
-            ),
-            (
-                0b1000000_00011_00010_000_00001_1100011,
-                Beq { rs1, rs2, imm },
-            ),
-            (
-                0b1000000_00011_00010_001_00001_1100011,
-                Bne { rs1, rs2, imm },
-            ),
-            (
-                0b1000000_00011_00010_100_00001_1100011,
-                Blt { rs1, rs2, imm },
-            ),
-            (
-                0b1000000_00011_00010_101_00001_1100011,
-                Bge { rs1, rs2, imm },
-            ),
-            (
-                0b1000000_00011_00010_110_00001_1100011,
-                Bltu { rs1, rs2, imm },
-            ),
-            (
-                0b1000000_00011_00010_111_00001_1100011,
-                Bgeu { rs1, rs2, imm },
-            ),
-            (0b1_0000000000_1_11111111_00001_1101111, Jal { rd, imm }),
-            (
-                0b100000000000_00010_000_00001_1100111,
-                Jalr { rd, rs1, imm },
-            ),
-            (
-                0b00010010001101000101_00001_0110111,
-                Lui {
-                    rd,
-                    imm: 0x12345000,
-                },
-            ),
-            (0b0000_0000_0000_00000000_00000_1110011, Ecall),
-            (0b0000_0000_0001_00000000_00000_1110011, Ebreak),
-        ];
-        for (bcode, inst) in maps {
-            assert_eq!(Instruction::try_from(bcode).unwrap(), inst);
-            assert_eq!(u32::from(inst), bcode);
-        }
+    fn decodes_add() {
+        assert_round_trip(
+            0b0000000_00011_00010_000_00001_0110011,
+            Add {
+                rd: 1,
+                rs1: 2,
+                rs2: 3,
+            },
+        );
+    }
+
+    #[test]
+    fn decodes_sub() {
+        assert_round_trip(
+            0b0100000_00011_00010_000_00001_0110011,
+            Sub {
+                rd: 1,
+                rs1: 2,
+                rs2: 3,
+            },
+        );
+    }
+
+    #[test]
+    fn decodes_xor() {
+        assert_round_trip(
+            0b0000000_00011_00010_100_00001_0110011,
+            Xor {
+                rd: 1,
+                rs1: 2,
+                rs2: 3,
+            },
+        );
+    }
+
+    #[test]
+    fn decodes_or() {
+        assert_round_trip(
+            0b0000000_00011_00010_110_00001_0110011,
+            Or {
+                rd: 1,
+                rs1: 2,
+                rs2: 3,
+            },
+        );
+    }
+
+    #[test]
+    fn decodes_and() {
+        assert_round_trip(
+            0b0000000_00011_00010_111_00001_0110011,
+            And {
+                rd: 1,
+                rs1: 2,
+                rs2: 3,
+            },
+        );
+    }
+
+    #[test]
+    fn decodes_sll() {
+        assert_round_trip(
+            0b0000000_00011_00010_001_00001_0110011,
+            Sll {
+                rd: 1,
+                rs1: 2,
+                rs2: 3,
+            },
+        );
+    }
+
+    #[test]
+    fn decodes_srl() {
+        assert_round_trip(
+            0b0000000_00011_00010_101_00001_0110011,
+            Srl {
+                rd: 1,
+                rs1: 2,
+                rs2: 3,
+            },
+        );
+    }
+
+    #[test]
+    fn decodes_sra() {
+        assert_round_trip(
+            0b0100000_00011_00010_101_00001_0110011,
+            Sra {
+                rd: 1,
+                rs1: 2,
+                rs2: 3,
+            },
+        );
+    }
+
+    #[test]
+    fn decodes_slt() {
+        assert_round_trip(
+            0b0000000_00011_00010_010_00001_0110011,
+            Slt {
+                rd: 1,
+                rs1: 2,
+                rs2: 3,
+            },
+        );
+    }
+
+    #[test]
+    fn decodes_sltu() {
+        assert_round_trip(
+            0b0000000_00011_00010_011_00001_0110011,
+            Sltu {
+                rd: 1,
+                rs1: 2,
+                rs2: 3,
+            },
+        );
+    }
+
+    #[test]
+    fn decodes_addi() {
+        assert_round_trip(
+            0b1000_0000_0000_00010_000_00001_0010011,
+            Addi {
+                rd: 1,
+                rs1: 2,
+                imm: -2048,
+            },
+        );
+    }
+
+    #[test]
+    fn decodes_xori() {
+        assert_round_trip(
+            0b1000_0000_0000_00010_100_00001_0010011,
+            Xori {
+                rd: 1,
+                rs1: 2,
+                imm: -2048,
+            },
+        );
+    }
+
+    #[test]
+    fn decodes_ori() {
+        assert_round_trip(
+            0b1000_0000_0000_00010_110_00001_0010011,
+            Ori {
+                rd: 1,
+                rs1: 2,
+                imm: -2048,
+            },
+        );
+    }
+
+    #[test]
+    fn decodes_andi() {
+        assert_round_trip(
+            0b1000_0000_0000_00010_111_00001_0010011,
+            Andi {
+                rd: 1,
+                rs1: 2,
+                imm: -2048,
+            },
+        );
+    }
+
+    #[test]
+    fn decodes_slli() {
+        assert_round_trip(
+            0b0000_0000_1000_00010_001_00001_0010011,
+            Slli {
+                rd: 1,
+                rs1: 2,
+                imm: 8,
+            },
+        );
+    }
+
+    #[test]
+    fn decodes_srli() {
+        assert_round_trip(
+            0b0000_0000_1000_00010_101_00001_0010011,
+            Srli {
+                rd: 1,
+                rs1: 2,
+                imm: 8,
+            },
+        );
+    }
+
+    #[test]
+    fn decodes_srai() {
+        assert_round_trip(
+            0b0100_0000_1000_00010_101_00001_0010011,
+            Srai {
+                rd: 1,
+                rs1: 2,
+                imm: 8,
+            },
+        );
+    }
+
+    #[test]
+    fn decodes_slti() {
+        assert_round_trip(
+            0b1000_0000_0000_00010_010_00001_0010011,
+            Slti {
+                rd: 1,
+                rs1: 2,
+                imm: -2048,
+            },
+        );
+    }
+
+    #[test]
+    fn decodes_sltiu() {
+        assert_round_trip(
+            0b1000_0000_0000_00010_011_00001_0010011,
+            Sltiu {
+                rd: 1,
+                rs1: 2,
+                imm: 0xffff_f800,
+            },
+        );
+    }
+
+    #[test]
+    fn decodes_lb() {
+        assert_round_trip(
+            0b1000_0000_0000_00010_000_00001_0000011,
+            Lb {
+                rd: 1,
+                rs1: 2,
+                imm: -2048,
+            },
+        );
+    }
+
+    #[test]
+    fn decodes_lh() {
+        assert_round_trip(
+            0b1000_0000_0000_00010_001_00001_0000011,
+            Lh {
+                rd: 1,
+                rs1: 2,
+                imm: -2048,
+            },
+        );
+    }
+
+    #[test]
+    fn decodes_lw() {
+        assert_round_trip(
+            0b1000_0000_0000_00010_010_00001_0000011,
+            Lw {
+                rd: 1,
+                rs1: 2,
+                imm: -2048,
+            },
+        );
+    }
+
+    #[test]
+    fn decodes_lbu() {
+        assert_round_trip(
+            0b1000_0000_0000_00010_100_00001_0000011,
+            Lbu {
+                rd: 1,
+                rs1: 2,
+                imm: -2048,
+            },
+        );
+    }
+
+    #[test]
+    fn decodes_lhu() {
+        assert_round_trip(
+            0b1000_0000_0000_00010_101_00001_0000011,
+            Lhu {
+                rd: 1,
+                rs1: 2,
+                imm: -2048,
+            },
+        );
+    }
+
+    #[test]
+    fn decodes_sb() {
+        assert_round_trip(
+            0b1000000_00011_00010_000_00000_0100011,
+            Sb {
+                rs2: 3,
+                imm: -2048,
+                rs1: 2,
+            },
+        );
+    }
+
+    #[test]
+    fn decodes_sh() {
+        assert_round_trip(
+            0b1000000_00011_00010_001_00000_0100011,
+            Sh {
+                rs2: 3,
+                imm: -2048,
+                rs1: 2,
+            },
+        );
+    }
+
+    #[test]
+    fn decodes_sw() {
+        assert_round_trip(
+            0b1000000_00011_00010_010_00000_0100011,
+            Sw {
+                rs2: 3,
+                imm: -2048,
+                rs1: 2,
+            },
+        );
+    }
+
+    #[test]
+    fn decodes_beq() {
+        assert_round_trip(
+            0b1000000_00011_00010_000_00001_1100011,
+            Beq {
+                rs1: 2,
+                rs2: 3,
+                imm: -2048,
+            },
+        );
+    }
+
+    #[test]
+    fn decodes_bne() {
+        assert_round_trip(
+            0b1000000_00011_00010_001_00001_1100011,
+            Bne {
+                rs1: 2,
+                rs2: 3,
+                imm: -2048,
+            },
+        );
+    }
+
+    #[test]
+    fn decodes_blt() {
+        assert_round_trip(
+            0b1000000_00011_00010_100_00001_1100011,
+            Blt {
+                rs1: 2,
+                rs2: 3,
+                imm: -2048,
+            },
+        );
+    }
+
+    #[test]
+    fn decodes_bge() {
+        assert_round_trip(
+            0b1000000_00011_00010_101_00001_1100011,
+            Bge {
+                rs1: 2,
+                rs2: 3,
+                imm: -2048,
+            },
+        );
+    }
+
+    #[test]
+    fn decodes_bltu() {
+        assert_round_trip(
+            0b1000000_00011_00010_110_00001_1100011,
+            Bltu {
+                rs1: 2,
+                rs2: 3,
+                imm: -2048,
+            },
+        );
+    }
+
+    #[test]
+    fn decodes_bgeu() {
+        assert_round_trip(
+            0b1000000_00011_00010_111_00001_1100011,
+            Bgeu {
+                rs1: 2,
+                rs2: 3,
+                imm: -2048,
+            },
+        );
+    }
+
+    #[test]
+    fn decodes_jal() {
+        assert_round_trip(
+            0b1_0000000000_1_11111111_00001_1101111,
+            Jal { rd: 1, imm: -2048 },
+        );
+    }
+
+    #[test]
+    fn decodes_jalr() {
+        assert_round_trip(
+            0b100000000000_00010_000_00001_1100111,
+            Jalr {
+                rd: 1,
+                rs1: 2,
+                imm: -2048,
+            },
+        );
+    }
+
+    #[test]
+    fn decodes_lui() {
+        assert_round_trip(
+            0b00010010001101000101_00001_0110111,
+            Lui {
+                rd: 1,
+                imm: 0x1234_5000,
+            },
+        );
+    }
+
+    #[test]
+    fn decodes_auipc() {
+        assert_round_trip(
+            0b00010010001101000101_00001_0010111,
+            Auipc {
+                rd: 1,
+                imm: 0x1234_5000,
+            },
+        );
+    }
+
+    #[test]
+    fn decodes_fence() {
+        assert_round_trip(0x0000_000f, Fence);
+    }
+
+    #[test]
+    fn decodes_fence_tso() {
+        assert_eq!(Instruction::try_from(0x8330_000f).unwrap(), Fence);
+    }
+
+    #[test]
+    fn rejects_invalid_fence_encoding() {
+        assert!(Instruction::try_from(0x8110_000f).is_err());
+    }
+
+    #[test]
+    fn rejects_ecall_with_nonzero_rd() {
+        assert!(Instruction::try_from(0x0000_00f3).is_err());
+    }
+
+    #[test]
+    fn decodes_ecall() {
+        assert_round_trip(0b0000_0000_0000_00000000_00000_1110011, Ecall);
+    }
+
+    #[test]
+    fn decodes_ebreak() {
+        assert_round_trip(0b0000_0000_0001_00000000_00000_1110011, Ebreak);
     }
 }
 
@@ -868,7 +1204,7 @@ mod execution_tests {
     use super::{Instruction::*, Machine};
 
     #[test]
-    fn stores_write_the_requested_number_of_bytes() {
+    fn store_halfword_writes_two_bytes() {
         let mut machine = Machine::new(16);
         machine.register[1] = 4;
         machine.register[2] = 0x1234_5678;
@@ -880,6 +1216,17 @@ mod execution_tests {
                 rs1: 1,
             })
             .unwrap();
+
+        assert_eq!(&machine.memory[4..6], &[0x78, 0x56]);
+        assert_eq!(machine.pc, 4);
+    }
+
+    #[test]
+    fn store_word_writes_four_bytes() {
+        let mut machine = Machine::new(16);
+        machine.register[1] = 4;
+        machine.register[2] = 0x1234_5678;
+
         machine
             .exec_inst(&Sw {
                 rs2: 2,
@@ -888,17 +1235,15 @@ mod execution_tests {
             })
             .unwrap();
 
-        assert_eq!(&machine.memory[4..6], &[0x78, 0x56]);
         assert_eq!(&machine.memory[8..12], &[0x78, 0x56, 0x34, 0x12]);
-        assert_eq!(machine.pc, 8);
+        assert_eq!(machine.pc, 4);
     }
 
     #[test]
-    fn register_shifts_use_only_the_low_five_bits() {
+    fn sll_uses_only_the_low_five_shift_bits() {
         let mut machine = Machine::new(16);
         machine.register[1] = 0x8000_0001_u32 as i32;
         machine.register[2] = 0x21;
-
         machine
             .exec_inst(&Sll {
                 rd: 3,
@@ -906,6 +1251,14 @@ mod execution_tests {
                 rs2: 2,
             })
             .unwrap();
+        assert_eq!(machine.rru(3), 2);
+    }
+
+    #[test]
+    fn srl_uses_only_the_low_five_shift_bits() {
+        let mut machine = Machine::new(16);
+        machine.register[1] = 0x8000_0001_u32 as i32;
+        machine.register[2] = 0x21;
         machine
             .exec_inst(&Srl {
                 rd: 4,
@@ -913,6 +1266,14 @@ mod execution_tests {
                 rs2: 2,
             })
             .unwrap();
+        assert_eq!(machine.rru(4), 0x4000_0000);
+    }
+
+    #[test]
+    fn sra_uses_only_the_low_five_shift_bits() {
+        let mut machine = Machine::new(16);
+        machine.register[1] = 0x8000_0001_u32 as i32;
+        machine.register[2] = 0x21;
         machine
             .exec_inst(&Sra {
                 rd: 5,
@@ -920,9 +1281,6 @@ mod execution_tests {
                 rs2: 2,
             })
             .unwrap();
-
-        assert_eq!(machine.rru(3), 2);
-        assert_eq!(machine.rru(4), 0x4000_0000);
         assert_eq!(machine.rr(5), 0xc000_0000_u32 as i32);
     }
 
@@ -961,7 +1319,7 @@ mod execution_tests {
     }
 
     #[test]
-    fn out_of_bounds_memory_access_returns_error_without_panicking() {
+    fn out_of_bounds_store_returns_error_without_advancing_pc() {
         let mut machine = Machine::new(4);
         machine.register[1] = 3;
         machine.register[2] = 0x1234;
@@ -976,6 +1334,12 @@ mod execution_tests {
                 .is_err()
         );
         assert_eq!(machine.pc, 0);
+    }
+
+    #[test]
+    fn out_of_bounds_load_returns_error_without_advancing_pc() {
+        let mut machine = Machine::new(4);
+        machine.register[1] = 3;
         assert!(
             machine
                 .exec_inst(&Lw {
@@ -986,20 +1350,19 @@ mod execution_tests {
                 .is_err()
         );
         assert_eq!(machine.pc, 0);
+    }
+
+    #[test]
+    fn instruction_fetch_out_of_bounds_returns_error() {
+        let mut machine = Machine::new(4);
         machine.pc = 4;
         assert!(machine.parse_inst().is_err());
     }
 
     #[test]
-    fn fence_is_a_supported_no_op_and_invalid_system_encodings_are_rejected() {
+    fn fence_is_a_supported_no_op() {
         let mut machine = Machine::new(4);
-        assert_eq!(super::Instruction::try_from(0x0000_000f).unwrap(), Fence);
-        assert_eq!(super::Instruction::try_from(0x8330_000f).unwrap(), Fence);
-        assert!(super::Instruction::try_from(0x8110_000f).is_err());
         machine.exec_inst(&Fence).unwrap();
         assert_eq!(machine.pc, 4);
-
-        let ecall_with_rd = 0x0000_00f3;
-        assert!(super::Instruction::try_from(ecall_with_rd).is_err());
     }
 }
