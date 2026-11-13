@@ -1,4 +1,4 @@
-use anyhow::bail;
+use anyhow::{Ok, bail};
 
 #[derive(Debug, PartialEq)]
 enum Instruction {
@@ -39,7 +39,7 @@ enum Instruction {
     /// Set Less Than Imm rd = (rs1 < imm)?1:0
     Slti { rd: usize, rs1: usize, imm: i32 },
     /// Set Less Than Imm(U) rd = (rs1 < imm)?1:0
-    Sltiu { rd: usize, rs1: usize, imm: i32 },
+    Sltiu { rd: usize, rs1: usize, imm: u32 },
     /// Load Byte rd = M[rs1+imm][0:7]
     Lb { rd: usize, rs1: usize, imm: i32 },
     /// Load Half rd = M[rs1+imm][0:15]
@@ -141,7 +141,11 @@ impl TryFrom<u32> for Instruction {
                         _ => bail!("invalid shift imm:{:x}", imm),
                     },
                     0x2 => Ok(Slti { rd, rs1, imm }),
-                    0x3 => Ok(Sltiu { rd, rs1, imm }),
+                    0x3 => Ok(Sltiu {
+                        rd,
+                        rs1,
+                        imm: imm as u32,
+                    }),
                     _ => bail!("invalid funct3:{:x}", funct3),
                 }
             }
@@ -251,16 +255,303 @@ struct Machine {
 }
 
 impl Machine {
-    fn new(memory_size: usize) -> Self {
+    pub fn new(memory_size: usize) -> Self {
         Self {
             register: [0; 32],
             memory: vec![0; memory_size],
             pc: 0,
         }
     }
+
+    fn rr(&self, xx: usize) -> i32 {
+        self.register[xx]
+    }
+
+    fn rru(&self, xx: usize) -> u32 {
+        self.register[xx] as u32
+    }
+
+    fn wr(&mut self, xx: usize, val: i32) {
+        if xx == 0 {
+            return;
+        }
+        self.register[xx] = val;
+    }
+
+    fn wru(&mut self, xx: usize, val: u32) {
+        self.wr(xx, val as i32)
+    }
+
+    fn advance_pc(&mut self) {
+        self.pc += 4
+    }
+
+    fn jump(&mut self, offset: i32) {
+        self.pc = self.pc.wrapping_add_signed(offset as isize);
+    }
+
+    fn parse_inst(&self) -> anyhow::Result<Instruction> {
+        let word = u32::from_le_bytes(self.memory[self.pc..self.pc + 4].try_into()?);
+        Instruction::try_from(word)
+    }
+
+    fn exec_inst(&mut self, inst: &Instruction) -> anyhow::Result<()> {
+        use Instruction::*;
+        match inst {
+            Add { rd, rs1, rs2 } => {
+                self.wr(*rd, self.rr(*rs1).wrapping_add(self.rr(*rs2)));
+                self.advance_pc();
+            }
+            Sub { rd, rs1, rs2 } => {
+                self.wr(*rd, self.rr(*rs1).wrapping_sub(self.rr(*rs2)));
+                self.advance_pc();
+            }
+            Xor { rd, rs1, rs2 } => {
+                self.wr(*rd, self.rr(*rs1) ^ self.rr(*rs2));
+                self.advance_pc();
+            }
+            Or { rd, rs1, rs2 } => {
+                self.wr(*rd, self.rr(*rs1) | self.rr(*rs2));
+                self.advance_pc();
+            }
+            And { rd, rs1, rs2 } => {
+                self.wr(*rd, self.rr(*rs1) & self.rr(*rs2));
+                self.advance_pc();
+            }
+            Sll { rd, rs1, rs2 } => {
+                self.wr(*rd, self.rr(*rs1) << self.rr(*rs2));
+                self.advance_pc();
+            }
+            Srl { rd, rs1, rs2 } => {
+                self.wr(*rd, (self.rru(*rs1) >> self.rr(*rs2)) as i32);
+                self.advance_pc();
+            }
+            Sra { rd, rs1, rs2 } => {
+                self.wr(*rd, self.rr(*rs1) >> self.rr(*rs2));
+                self.advance_pc();
+            }
+            Slt { rd, rs1, rs2 } => {
+                if self.rr(*rs1) < self.rr(*rs2) {
+                    self.wr(*rd, 1);
+                } else {
+                    self.wr(*rd, 0);
+                }
+                self.advance_pc();
+            }
+            Sltu { rd, rs1, rs2 } => {
+                if self.rru(*rs1) < self.rru(*rs2) {
+                    self.wr(*rd, 1);
+                } else {
+                    self.wr(*rd, 0);
+                }
+                self.advance_pc();
+            }
+            Addi { rd, rs1, imm } => {
+                self.wr(*rd, self.rr(*rs1).wrapping_add(*imm));
+                self.advance_pc();
+            }
+            Xori { rd, rs1, imm } => {
+                self.wr(*rd, self.rr(*rs1) ^ *imm);
+                self.advance_pc();
+            }
+            Ori { rd, rs1, imm } => {
+                self.wr(*rd, self.rr(*rs1) | *imm);
+                self.advance_pc();
+            }
+            Andi { rd, rs1, imm } => {
+                self.wr(*rd, self.rr(*rs1) & *imm);
+                self.advance_pc();
+            }
+            Slli { rd, rs1, imm } => {
+                self.wr(*rd, self.rr(*rs1) << *imm);
+                self.advance_pc();
+            }
+            Srli { rd, rs1, imm } => {
+                self.wr(*rd, (self.rru(*rs1) >> *imm) as i32);
+                self.advance_pc();
+            }
+            Srai { rd, rs1, imm } => {
+                self.wr(*rd, self.rr(*rs1) >> *imm);
+                self.advance_pc();
+            }
+            Slti { rd, rs1, imm } => {
+                self.wr(*rd, if self.rr(*rs1) < *imm { 1 } else { 0 });
+                self.advance_pc();
+            }
+            Sltiu { rd, rs1, imm } => {
+                self.wr(*rd, if self.rru(*rs1) < *imm { 1 } else { 0 });
+                self.advance_pc();
+            }
+            Lb { rd, rs1, imm } => {
+                let addr = (self.rr(*rs1) + imm) as usize;
+                let byte = self.memory[addr] as i8 as i32;
+                self.wr(*rd, byte);
+                self.advance_pc();
+            }
+            Lh { rd, rs1, imm } => {
+                let addr = (self.rr(*rs1) + imm) as usize;
+                let hw: i16 = i16::from_le_bytes(self.memory[addr..addr + 2].try_into()?);
+                self.wr(*rd, hw as i32);
+                self.advance_pc();
+            }
+            Lw { rd, rs1, imm } => {
+                let addr = (self.rr(*rs1) + imm) as usize;
+                let wd: i32 = i32::from_le_bytes(self.memory[addr..addr + 4].try_into()?);
+                self.wr(*rd, wd);
+                self.advance_pc();
+            }
+            Lbu { rd, rs1, imm } => {
+                let addr = (self.rr(*rs1) + imm) as usize;
+                let byte = self.memory[addr];
+                self.wr(*rd, byte as i32);
+                self.advance_pc();
+            }
+            Lhu { rd, rs1, imm } => {
+                let addr = (self.rr(*rs1) + imm) as usize;
+                let hw: u16 = u16::from_le_bytes(self.memory[addr..addr + 2].try_into()?);
+                self.wr(*rd, hw as i32);
+                self.advance_pc();
+            }
+            Sb { rs2, imm, rs1 } => {
+                let addr = (self.rr(*rs1) + imm) as usize;
+                let val = self.rr(*rs2) as u8;
+                self.memory[addr] = val;
+                self.advance_pc();
+            }
+            Sh { rs2, imm, rs1 } => {
+                let addr = (self.rr(*rs1) + imm) as usize;
+                let val = self.rr(*rs2) as u16;
+                self.memory[addr..addr + 1].copy_from_slice(&val.to_le_bytes());
+                self.advance_pc();
+            }
+            Sw { rs2, imm, rs1 } => {
+                let addr = (self.rr(*rs1) + imm) as usize;
+                let val = self.rr(*rs2);
+                self.memory[addr..addr + 1].copy_from_slice(&val.to_le_bytes());
+                self.advance_pc();
+            }
+            Beq { rs1, rs2, imm } => {
+                if self.rr(*rs1) == self.rr(*rs2) {
+                    self.jump(*imm);
+                } else {
+                    self.advance_pc();
+                }
+            }
+            Bne { rs1, rs2, imm } => {
+                if self.rr(*rs1) != self.rr(*rs2) {
+                    self.jump(*imm);
+                } else {
+                    self.advance_pc();
+                }
+            }
+            Blt { rs1, rs2, imm } => {
+                if self.rr(*rs1) < self.rr(*rs2) {
+                    self.jump(*imm);
+                } else {
+                    self.advance_pc();
+                }
+            }
+            Bge { rs1, rs2, imm } => {
+                if self.rr(*rs1) >= self.rr(*rs2) {
+                    self.jump(*imm);
+                } else {
+                    self.advance_pc();
+                }
+            }
+            Bltu { rs1, rs2, imm } => {
+                if self.rru(*rs1) < self.rru(*rs2) {
+                    self.jump(*imm);
+                } else {
+                    self.advance_pc();
+                }
+            }
+            Bgeu { rs1, rs2, imm } => {
+                if self.rru(*rs1) >= self.rru(*rs2) {
+                    self.jump(*imm);
+                } else {
+                    self.advance_pc();
+                }
+            }
+            Jal { rd, imm } => {
+                self.wru(*rd, self.pc as u32 + 4);
+                self.jump(*imm);
+            }
+            Jalr { rd, rs1, imm } => {
+                self.wru(*rd, self.pc as u32 + 4);
+                let addr = self.rr(*rs1) as isize + *imm as isize;
+                self.pc = addr as usize;
+            }
+            Lui { rd, imm } => {
+                self.wru(*rd, *imm);
+                self.advance_pc();
+            }
+            Auipc { rd, imm } => {
+                let val = (self.pc as u32).wrapping_add(*imm);
+                self.wru(*rd, val);
+                self.advance_pc();
+            }
+            Ecall => bail!("ecall not supported"),
+            Ebreak => bail!("ebreak not supported"),
+        }
+        Ok(())
+    }
+
+    fn step(&mut self) -> anyhow::Result<()> {
+        let inst = self.parse_inst()?;
+        self.exec_inst(&inst)?;
+        Ok(())
+    }
+
+    fn run(&mut self) -> anyhow::Result<()> {
+        loop {
+            self.step()?
+        }
+    }
+
+    fn dump_reg(&self) {
+        for i in 0..32 {
+            if i % 4 == 0 {
+                print!("{:02}: ", i);
+            }
+            print!("{:08x} ", self.register[i]);
+            if i % 4 == 3 {
+                println!();
+            }
+        }
+    }
+
+    fn debug(&self) {
+        self.dump_reg();
+    }
 }
 
-fn main() {}
+fn main() -> anyhow::Result<()> {
+    use Instruction::*;
+    let mut machine = Machine::new(4096);
+
+    let inst = vec![
+        Addi {
+            rd: 1,
+            rs1: 0,
+            imm: 0x1,
+        },
+        Addi {
+            rd: 2,
+            rs1: 0,
+            imm: 0x11,
+        },
+        Add {
+            rd: 3,
+            rs1: 1,
+            rs2: 2,
+        },
+    ];
+    for it in inst {
+        machine.exec_inst(&it);
+    }
+    machine.debug();
+    Ok(())
+}
 
 #[cfg(test)]
 mod inst_tests {
@@ -344,7 +635,11 @@ mod inst_tests {
             ),
             (
                 0b1000_0000_0000_00010_011_00001_0010011,
-                Sltiu { rd, rs1, imm },
+                Sltiu {
+                    rd,
+                    rs1,
+                    imm: imm as u32,
+                },
             ),
             (
                 0b1000_0000_0000_00010_000_00001_0000011,
