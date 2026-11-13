@@ -1,6 +1,6 @@
 use anyhow::{Ok, anyhow, bail};
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum Instruction {
     /// ADD rd = rs1 + rs2
     Add { rd: usize, rs1: usize, rs2: usize },
