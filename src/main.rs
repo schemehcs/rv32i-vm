@@ -1,4 +1,6 @@
 use anyhow::{Ok, anyhow, bail};
+use clap::Parser;
+use std::{fmt, path::PathBuf};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum Instruction {
@@ -82,6 +84,55 @@ enum Instruction {
     Ebreak,
     /// Fence memory and I/O operations
     Fence,
+}
+
+impl fmt::Display for Instruction {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        use Instruction::*;
+
+        match self {
+            Add { rd, rs1, rs2 } => write!(f, "add x{rd}, x{rs1}, x{rs2}"),
+            Sub { rd, rs1, rs2 } => write!(f, "sub x{rd}, x{rs1}, x{rs2}"),
+            Xor { rd, rs1, rs2 } => write!(f, "xor x{rd}, x{rs1}, x{rs2}"),
+            Or { rd, rs1, rs2 } => write!(f, "or x{rd}, x{rs1}, x{rs2}"),
+            And { rd, rs1, rs2 } => write!(f, "and x{rd}, x{rs1}, x{rs2}"),
+            Sll { rd, rs1, rs2 } => write!(f, "sll x{rd}, x{rs1}, x{rs2}"),
+            Srl { rd, rs1, rs2 } => write!(f, "srl x{rd}, x{rs1}, x{rs2}"),
+            Sra { rd, rs1, rs2 } => write!(f, "sra x{rd}, x{rs1}, x{rs2}"),
+            Slt { rd, rs1, rs2 } => write!(f, "slt x{rd}, x{rs1}, x{rs2}"),
+            Sltu { rd, rs1, rs2 } => write!(f, "sltu x{rd}, x{rs1}, x{rs2}"),
+            Addi { rd, rs1, imm } => write!(f, "addi x{rd}, x{rs1}, {imm}"),
+            Xori { rd, rs1, imm } => write!(f, "xori x{rd}, x{rs1}, {imm}"),
+            Ori { rd, rs1, imm } => write!(f, "ori x{rd}, x{rs1}, {imm}"),
+            Andi { rd, rs1, imm } => write!(f, "andi x{rd}, x{rs1}, {imm}"),
+            Slli { rd, rs1, imm } => write!(f, "slli x{rd}, x{rs1}, {imm}"),
+            Srli { rd, rs1, imm } => write!(f, "srli x{rd}, x{rs1}, {imm}"),
+            Srai { rd, rs1, imm } => write!(f, "srai x{rd}, x{rs1}, {imm}"),
+            Slti { rd, rs1, imm } => write!(f, "slti x{rd}, x{rs1}, {imm}"),
+            Sltiu { rd, rs1, imm } => write!(f, "sltiu x{rd}, x{rs1}, {}", *imm as i32),
+            Lb { rd, rs1, imm } => write!(f, "lb x{rd}, {imm}(x{rs1})"),
+            Lh { rd, rs1, imm } => write!(f, "lh x{rd}, {imm}(x{rs1})"),
+            Lw { rd, rs1, imm } => write!(f, "lw x{rd}, {imm}(x{rs1})"),
+            Lbu { rd, rs1, imm } => write!(f, "lbu x{rd}, {imm}(x{rs1})"),
+            Lhu { rd, rs1, imm } => write!(f, "lhu x{rd}, {imm}(x{rs1})"),
+            Sb { rs2, imm, rs1 } => write!(f, "sb x{rs2}, {imm}(x{rs1})"),
+            Sh { rs2, imm, rs1 } => write!(f, "sh x{rs2}, {imm}(x{rs1})"),
+            Sw { rs2, imm, rs1 } => write!(f, "sw x{rs2}, {imm}(x{rs1})"),
+            Beq { rs1, rs2, imm } => write!(f, "beq x{rs1}, x{rs2}, {imm}"),
+            Bne { rs1, rs2, imm } => write!(f, "bne x{rs1}, x{rs2}, {imm}"),
+            Blt { rs1, rs2, imm } => write!(f, "blt x{rs1}, x{rs2}, {imm}"),
+            Bge { rs1, rs2, imm } => write!(f, "bge x{rs1}, x{rs2}, {imm}"),
+            Bltu { rs1, rs2, imm } => write!(f, "bltu x{rs1}, x{rs2}, {imm}"),
+            Bgeu { rs1, rs2, imm } => write!(f, "bgeu x{rs1}, x{rs2}, {imm}"),
+            Jal { rd, imm } => write!(f, "jal x{rd}, {imm}"),
+            Jalr { rd, rs1, imm } => write!(f, "jalr x{rd}, {imm}(x{rs1})"),
+            Lui { rd, imm } => write!(f, "lui x{rd}, {:#x}", imm >> 12),
+            Auipc { rd, imm } => write!(f, "auipc x{rd}, {:#x}", imm >> 12),
+            Ecall => f.write_str("ecall"),
+            Ebreak => f.write_str("ebreak"),
+            Fence => f.write_str("fence"),
+        }
+    }
 }
 
 fn rd_field(word: u32) -> usize {
@@ -388,6 +439,11 @@ impl From<Instruction> for u32 {
     }
 }
 
+enum RetCode {
+    Cont,
+    Halt,
+}
+
 struct Machine {
     register: [i32; 32],
     memory: Vec<u8>,
@@ -401,6 +457,10 @@ impl Machine {
             memory: vec![0; memory_size],
             pc: 0,
         }
+    }
+
+    pub fn load_bin(&mut self, bin: &[u8]) {
+        self.memory[..bin.len()].copy_from_slice(bin);
     }
 
     fn rr(&self, xx: usize) -> i32 {
@@ -450,7 +510,7 @@ impl Machine {
         Instruction::try_from(word)
     }
 
-    fn exec_inst(&mut self, inst: &Instruction) -> anyhow::Result<()> {
+    fn exec_inst(&mut self, inst: &Instruction) -> anyhow::Result<RetCode> {
         use Instruction::*;
         match inst {
             Add { rd, rs1, rs2 } => {
@@ -658,21 +718,21 @@ impl Machine {
                 self.advance_pc();
             }
             Ecall => bail!("ecall not supported"),
-            Ebreak => bail!("ebreak not supported"),
+            Ebreak => return Ok(RetCode::Halt),
             Fence => self.advance_pc(),
         }
-        Ok(())
+        Ok(RetCode::Cont)
     }
 
-    fn step(&mut self) -> anyhow::Result<()> {
-        let inst = self.parse_inst()?;
-        self.exec_inst(&inst)?;
-        Ok(())
+    fn step(&mut self) -> anyhow::Result<RetCode> {
+        self.exec_inst(&self.parse_inst()?)
     }
 
     fn run(&mut self) -> anyhow::Result<()> {
         loop {
-            self.step()?
+            if matches!(self.step()?, RetCode::Halt) {
+                return Ok(());
+            }
         }
     }
 
@@ -693,30 +753,20 @@ impl Machine {
     }
 }
 
-fn main() -> anyhow::Result<()> {
-    use Instruction::*;
-    let mut machine = Machine::new(4096);
+#[derive(Parser)]
+#[command(version, about, long_about=None)]
+struct Cli {
+    /// program file
+    #[arg(value_name = "FILE")]
+    path: PathBuf,
+}
 
-    let inst = vec![
-        Addi {
-            rd: 1,
-            rs1: 0,
-            imm: 0x1,
-        },
-        Addi {
-            rd: 2,
-            rs1: 0,
-            imm: 0x11,
-        },
-        Add {
-            rd: 3,
-            rs1: 1,
-            rs2: 2,
-        },
-    ];
-    for it in inst {
-        machine.exec_inst(&it)?;
-    }
+fn main() -> anyhow::Result<()> {
+    let cli = Cli::parse();
+    let bin = std::fs::read(cli.path)?;
+    let mut machine = Machine::new(2 << 20);
+    machine.load_bin(&bin);
+    machine.run()?;
     machine.debug();
     Ok(())
 }
@@ -1364,5 +1414,76 @@ mod execution_tests {
         let mut machine = Machine::new(4);
         machine.exec_inst(&Fence).unwrap();
         assert_eq!(machine.pc, 4);
+    }
+}
+
+#[cfg(test)]
+mod display_tests {
+    use super::Instruction::*;
+
+    #[test]
+    fn formats_riscv_assembly_operands() {
+        assert_eq!(
+            Add {
+                rd: 1,
+                rs1: 2,
+                rs2: 3
+            }
+            .to_string(),
+            "add x1, x2, x3"
+        );
+        assert_eq!(
+            Lw {
+                rd: 5,
+                rs1: 6,
+                imm: -12
+            }
+            .to_string(),
+            "lw x5, -12(x6)"
+        );
+        assert_eq!(
+            Sw {
+                rs2: 7,
+                imm: 16,
+                rs1: 8
+            }
+            .to_string(),
+            "sw x7, 16(x8)"
+        );
+        assert_eq!(
+            Sltiu {
+                rd: 9,
+                rs1: 10,
+                imm: 0xffff_f800
+            }
+            .to_string(),
+            "sltiu x9, x10, -2048"
+        );
+        assert_eq!(
+            Lui {
+                rd: 11,
+                imm: 0x1234_5000
+            }
+            .to_string(),
+            "lui x11, 0x12345"
+        );
+        assert_eq!(Ecall.to_string(), "ecall");
+    }
+
+    #[test]
+    fn displays_decoded_instructions() {
+        let instruction = super::Instruction::try_from(0xfe1f_f0ef).unwrap();
+        assert_eq!(instruction.to_string(), "jal x1, -32");
+    }
+}
+
+#[cfg(test)]
+mod playground {
+    use super::*;
+
+    #[test]
+    fn playground() {
+        let inst = 0xff010113;
+        println!("{}", Instruction::try_from(inst).unwrap())
     }
 }
